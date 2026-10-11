@@ -1,0 +1,249 @@
+import { balanced, parseJson, readVar, stringEnd } from './embedded.js';
+import { request } from './http.js';
+import { decodeEntities, formatMoney, htmlToText, markupToText, section, truncate } from './text.js';
+
+const SITE = 'https://www.wowhead.com';
+const PAGE_CHARS = 12_000;
+const LIST_ROWS = 12;
+const LOOKUP_ROWS = 5;
+
+// Wowhead serves each game version under its own path and labels every page and comment with it.
+// `label` is the page's dataTree name and `comments` the dataTree id of comments written for that version,
+// so answers never mix in another version's data or comments from older versions with other mechanics.
+// Wowhead has news feeds for Retail, Classic and Forever only, so the Classic progression versions share the Classic feed.
+export const EDITIONS = {
+  retail: { path: '', label: 'Retail', comments: 1, news: 'retail' },
+  classic: { path: 'classic', label: 'Classic', comments: 4, news: 'classic' },
+  tbc: { path: 'tbc', label: 'Burning Crusade', comments: 5, news: 'classic' },
+  wotlk: { path: 'wotlk', label: 'Wrath of the Lich King', comments: 8, news: 'classic' },
+  cata: { path: 'cata', label: 'Cataclysm', comments: 11, news: 'classic' },
+  'mop-classic': { path: 'mop-classic', label: 'Mists of Pandaria', comments: 15, news: 'classic' },
+  forever: { path: 'forever', label: 'Forever', comments: 16, news: 'forever' },
+};
+
+// Wowhead type ids from page data, mapped to their URL slugs.
+const TYPES = {
+  1: 'npc', 2: 'object', 3: 'item', 4: 'item-set', 5: 'quest', 6: 'spell', 7: 'zone', 8: 'faction', 9: 'pet',
+  10: 'achievement', 11: 'title', 12: 'event', 13: 'class', 14: 'race', 15: 'skill', 17: 'currency',
+  20: 'building', 22: 'mission-ability', 26: 'threat', 100: 'guide', 101: 'transmog-set', 162: 'news',
+};
+
+// The tooltip endpoint answers only for these types.
+const TOOLTIP_TYPES = new Set(['npc', 'object', 'item', 'item-set', 'quest', 'spell', 'zone', 'achievement', 'currency']);
+
+// Listview templates whose rows are entities with their own page.
+const ENTITY_TEMPLATES = new Set(['npc', 'object', 'item', 'itemset', 'quest', 'spell', 'zone', 'faction', 'achievement', 'currency', 'title', 'event', 'skill', 'pet', 'guide']);
+
+// Related lists that hold media, community posts or cosmetics rather than game facts.
+const SKIPPED_LISTS = new Set(['comments', 'screenshots', 'videos', 'videos-english', 'sounds', 'outfits', 'outfit', 'transmog-with', 'same-model-as', 'news', 'news-comments']);
+
+// Database listings that /search would cover, keyed by their URL with the type of their rows.
+const LOOKUP_LISTS = { items: 'item', npcs: 'npc', quests: 'quest', spells: 'spell' };
+
+export function editionUrl(edition) {
+  const { path } = EDITIONS[edition];
+  return path ? `${SITE}/${path}` : SITE;
+}
+
+// Wowhead's robots.txt disallows /search for bots, so names are matched in the database listings,
+// like /forever/quests/name:library, which also cover the newest beta content.
+export async function lookup(query, edition) {
+  const base = editionUrl(edition);
+  const lists = await Promise.all(Object.entries(LOOKUP_LISTS).map(async ([list, type]) => {
+    const response = await request(`${base}/${list}/name:${encodeURIComponent(query)}`);
+    const rows = listviews(await response.text()).find((view) => view.id === list)?.rows ?? [];
+    rows.sort((a, b) => (b.popularity ?? 0) - (a.popularity ?? 0));
+    return rows.slice(0, LOOKUP_ROWS).map((row) => `- ${row.name ?? row.displayName} (${type}) ${base}/${type}=${row.id}`);
+  }));
+  return lists.flat().join('\n');
+}
+
+// `only` limits pages to one edition, for hosts that serve a single game version.
+export async function getWowheadPage(input, only) {
+  const response = await request(pageUrl(input));
+  const html = await response.text();
+
+  // Checked after redirects, which can lead from a /forever/ link to a Classic page.
+  const label = html.match(/"dataTree":"([^"]+)"/)?.[1];
+  const edition = Object.keys(EDITIONS).find((key) => EDITIONS[key].label === label);
+  if (!edition || (only && edition !== only)) {
+    const wanted = only ? `a WoW ${EDITIONS[only].label} page. Use search, get_news or a link under ${editionUrl(only)}/` : 'a World of Warcraft page';
+    throw new Error(`${response.url} is not ${wanted}.`);
+  }
+  const names = gathererNames(html);
+  const blocks = markupBlocks(html, names);
+  const pageInfo = html.match(/g_pageInfo\s*=\s*\{[^}]*\}/)?.[0] ?? '';
+  const type = TYPES[pageInfo.match(/\btype"?\s*:\s*(\d+)/)?.[1]];
+  const id = pageInfo.match(/\btypeId"?\s*:\s*(\d+)/)?.[1];
+
+  // Guides and news posts are one long article; database pages spread their facts over many parts.
+  const isEntity = Boolean(type && id) && type !== 'guide' && type !== 'news';
+  const quickFacts = blocks.filter((block) => block.target?.startsWith('infobox'));
+  const article = blocks.filter((block) => !quickFacts.includes(block)).map((block) => block.text).join('\n\n');
+
+  const sections = [
+    `# ${decodeEntities(html.match(/<title>([^<]*)/)?.[1] ?? '')}\n${response.url}`,
+    decodeEntities(html.match(/<meta name="description" content="([^"]*)"/)?.[1] ?? ''),
+    TOOLTIP_TYPES.has(type) ? section('Tooltip', await tooltip(edition, type, id)) : '',
+    section('Quick facts', quickFacts.map((block) => block.text).join('\n')),
+    section('Locations', locations(html)),
+    isEntity ? section('Page text', truncate(mainText(html), 3000)) : '',
+    ...relatedLists(html, names),
+    section('Article', isEntity ? truncate(article, 4000) : article),
+    section('Top comments', topComments(html, names, EDITIONS[edition].comments)),
+  ];
+  return sections.filter(Boolean).join('\n\n');
+}
+
+// Long pages come in parts, so small models keep their context and nothing is lost.
+// Parts end at a line break, so entries stay whole.
+export function pagePart(text, offset = 0) {
+  if (offset >= text.length) return `Nothing at offset ${offset}. The page has ${text.length} characters.`;
+  if (text.length - offset <= PAGE_CHARS) return text.slice(offset);
+  const lineEnd = text.lastIndexOf('\n', offset + PAGE_CHARS);
+  const end = lineEnd > offset ? lineEnd : offset + PAGE_CHARS;
+  return `${text.slice(offset, end).trimEnd()}\n\n[Part ends at ${end} of ${text.length} characters. `
+    + `Call get_page with offset ${end} for the next part.]`;
+}
+
+export async function getNews(edition) {
+  const response = await request(`${SITE}/news/rss/${EDITIONS[edition].news}`);
+  const xml = await response.text();
+  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 10).map(([, item]) => {
+    const field = (name) => decodeEntities(item.match(new RegExp(`<${name}>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?</${name}>`))?.[1] ?? '');
+    const posted = new Date(field('pubDate'));
+    const date = Number.isNaN(posted.getTime()) ? '' : posted.toISOString().slice(0, 10);
+    const summary = htmlToText(field('description')).replace(/Continue reading[\s\S]*$/, '').trim();
+    return `- ${date} ${field('title')}\n  ${field('link')}\n  ${truncate(summary, 300)}`;
+  });
+  return items.join('\n') || 'No news found.';
+}
+
+// Only Wowhead pages are fetched, so the tool can't be pointed at other hosts.
+function pageUrl(input) {
+  const url = new URL(input, `${SITE}/`);
+  if (url.hostname !== 'www.wowhead.com' && url.hostname !== 'wowhead.com') {
+    throw new Error(`Not a Wowhead URL: ${input}. Pass a URL like ${SITE}/item=19019.`);
+  }
+  return `${SITE}${url.pathname}${url.search}`;
+}
+
+async function tooltip(edition, type, id) {
+  const { path } = EDITIONS[edition];
+  try {
+    const response = await request(`https://nether.wowhead.com/${path ? `${path}/` : ''}tooltip/${type}/${id}`);
+    return htmlToText((await response.json()).tooltip ?? '');
+  } catch {
+    // The rest of the page still answers most questions.
+    return '';
+  }
+}
+
+// Pages name every entity they link once, in WH.Gatherer.addData(type, env, {id: {name_enus}}).
+function gathererNames(html) {
+  const names = new Map();
+  for (const match of html.matchAll(/WH\.Gatherer\.addData\((\d+),\s*\d+,\s*(?=\{)/g)) {
+    const type = TYPES[match[1]];
+    const entities = type && parseJson(balanced(html, match.index + match[0].length));
+    for (const [id, entity] of Object.entries(entities ?? {})) {
+      const name = entity.name_enus ?? entity.name;
+      if (name) names.set(`${type}=${id}`, name);
+    }
+  }
+  return names;
+}
+
+// Quick facts, articles, guides and news bodies are markup strings passed to WH.markup.printHtml("...", "target").
+function markupBlocks(html, names) {
+  const blocks = [];
+  for (const match of html.matchAll(/WH\.markup\.printHtml\(\s*(?=")/g)) {
+    const start = match.index + match[0].length;
+    const end = stringEnd(html, start);
+    const target = html.slice(end + 1, end + 200).match(/^\s*,\s*"([^"]+)"/)?.[1];
+    try {
+      blocks.push({ target, text: markupToText(JSON.parse(html.slice(start, end + 1)), names) });
+    } catch {
+      // A literal with JavaScript-only escapes is skipped.
+    }
+  }
+  return blocks;
+}
+
+// Quest text, spell details and NPC notes sit in the main column between its heading and the Guides or Related tabs.
+function mainText(html) {
+  const column = html.indexOf('<div class="text">');
+  const start = column < 0 ? -1 : html.indexOf('<h1', column);
+  if (start < 0) return '';
+  const body = html.slice(start);
+  const end = body.search(/<h2[^>]*>(Guides|Related)<\/h2>|tabsRelated/);
+  return htmlToText(end > 0 ? body.slice(0, end) : body);
+}
+
+function locations(html) {
+  const zones = Object.values(readVar(html, 'g_mapperData') ?? {}).flat();
+  return zones.filter((zone) => zone.coords?.length).map((zone) => {
+    const coords = zone.coords.slice(0, 3).map(([x, y]) => `${x}, ${y}`).join(' | ');
+    const more = zone.coords.length > 3 ? ` (+${zone.coords.length - 3} more)` : '';
+    return `- ${zone.uiMapName ?? 'Map'}: ${coords}${more}`;
+  }).join('\n');
+}
+
+// Related tabs and database listings are `new Listview({id: 'dropped-by', template: 'npc', data: [...]})`,
+// where data is an inline array or a variable holding one, like `data: listviewitems`.
+function listviews(html) {
+  const views = [];
+  for (const match of html.matchAll(/new Listview\(\s*(?=\{)/g)) {
+    const config = balanced(html, match.index + match[0].length);
+    const data = config.match(/\bdata"?\s*:\s*(\[|[A-Za-z_$][\w$]*(?=\s*[,}]))/);
+    if (!data) continue;
+    const head = config.slice(0, data.index);
+    const id = head.match(/\bid"?\s*:\s*["']([^"']+)/)?.[1];
+    const template = head.match(/\btemplate"?\s*:\s*["']([^"']+)/)?.[1];
+    if (!id || SKIPPED_LISTS.has(id)) continue;
+    const rows = data[1] === '[' ? parseJson(balanced(config, data.index + data[0].length - 1)) : readVar(html, data[1]);
+    if (Array.isArray(rows) && rows.length) views.push({ id, template, rows });
+  }
+  return views;
+}
+
+function relatedLists(html, names) {
+  return listviews(html).map(({ id, template, rows }) => {
+
+    // Best quality first, then highest drop chance, so a capped list keeps what players ask about.
+    rows.sort((a, b) => (b.quality ?? 0) - (a.quality ?? 0) || dropChance(b) - dropChance(a));
+    const lines = rows.slice(0, LIST_ROWS).map((row) => listRow(row, template, names));
+    if (rows.length > LIST_ROWS) lines.push(`- and ${rows.length - LIST_ROWS} more`);
+    return section(`${id} (${rows.length})`, lines.join('\n'));
+  });
+}
+
+function listRow(row, template, names) {
+  const name = row.name ?? row.title ?? row.subject ?? `#${row.id}`;
+  const slug = template === 'itemset' ? 'item-set' : template;
+  const link = ENTITY_TEMPLATES.has(template) && row.id ? ` (${slug}=${row.id})` : '';
+  const facts = [];
+  const chance = dropChance(row);
+  if (chance) facts.push(`${Number((chance * 100).toPrecision(2))}% chance`);
+  const zones = (row.location ?? []).map((zone) => names.get(`zone=${zone}`)).filter(Boolean);
+  if (zones.length) facts.push(zones.slice(0, 2).join(', '));
+  const copper = Array.isArray(row.cost?.[0]) ? row.cost[0][0] : row.cost?.[0];
+  if (copper > 0) facts.push(`costs ${formatMoney(copper)}`);
+  return `- ${name}${link}${facts.length ? `: ${facts.join(', ')}` : ''}`;
+}
+
+function dropChance(row) {
+  return row.count > 0 && row.outof > 0 ? row.count / row.outof : 0;
+}
+
+function topComments(html, names, dataTree) {
+  const comments = readVar(html, 'lv_comments0') ?? [];
+  return comments
+    .filter((comment) => comment.dataTree === dataTree && !comment.deleted && !comment.outofdate)
+    .sort((a, b) => b.rating - a.rating)
+    .slice(0, 3)
+    .map((comment) => {
+      const body = markupToText(comment.body ?? '', names).replace(/\s+/g, ' ');
+      return `- (${comment.rating > 0 ? '+' : ''}${comment.rating}, ${comment.date?.slice(0, 10)}) ${truncate(body, 500)}`;
+    })
+    .join('\n');
+}
