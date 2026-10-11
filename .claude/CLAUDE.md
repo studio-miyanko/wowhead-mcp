@@ -2,8 +2,9 @@
 
 ## Rules
 
-- A standalone MCP server for every Wowhead edition. Split out of wow-forever-search on 2026-10-11, which now runs it with `WOWHEAD_EDITION=forever`. The Discord bot wow-forever-bot imports `createServer({ edition: 'forever' })`.
-- MCP users and the bot follow `#semver:^1`. The wow-forever-search plugin pins an exact tag. A breaking tool change needs a major version.
+- A standalone MCP server for every Wowhead edition. Split out of wow-forever-search on 2026-10-11, which now uses the hosted `/forever/mcp`. The Discord bot wow-forever-bot imports `createServer({ edition: 'forever' })`.
+- The hosted endpoint is the Worker `wowhead-mcp` on the Workers Free plan, deployed by hand from `src/worker.js` (since 2026-10-11). `/mcp` serves every edition and `/<edition>/mcp` a locked server, like `/forever/mcp`, which the wow-forever-search plugin uses. It is open to anyone, with a per-IP limit of 30 requests a minute from the `LIMITER` binding, because every call shares the account's free daily Worker requests and goes to Wowhead from Cloudflare's addresses.
+- MCP users and the bot follow `#semver:^1`. A breaking tool change needs a major version.
 - `EDITIONS` in `src/wowhead.js` holds each version's URL path, page label (`"dataTree":"Forever"`), comment `dataTree` id and news feed. The ids come from `WH.dataEnv` in Wowhead's `tooltips.js`: 1 Retail, 4 Classic, 5 TBC, 8 Wrath, 11 Cata, 15 Mists, 16 Forever. Wowhead has news feeds only for retail, classic and forever.
 - A locked server refuses pages whose label is another edition, checked after redirects. An unlocked one refuses pages without a known label.
 - Personal, non-commercial use only. Wowhead's EULA forbids commercial use without written permission (checked 2026-10-09).
@@ -26,4 +27,4 @@
 2. Run `npm test`.
 3. Add the changes to `CHANGELOG.md`.
 4. Push, tag `vX.Y.Z` and create a GitHub release.
-5. Point the tag in wow-forever-search's `.mcp.json` at it when the plugin should pick it up.
+5. Run `npx wrangler deploy`, so the hosted endpoint serves the same release.
