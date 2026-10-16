@@ -1,6 +1,6 @@
 # Wowhead MCP
 
-Lets Claude read Wowhead for every World of Warcraft version: items, drops, quests, NPCs, spells, guides, news and patch notes. It is a read-only MCP server: connect to the hosted endpoint with no setup, or run it yourself. It needs no account, key or browser.
+Lets AI agents read Wowhead for every World of Warcraft version: items, drops, quests, NPCs, spells, guides, news and patch notes. It is a read-only MCP server that runs on your own computer and needs no account, key or browser.
 
 Unofficial and not affiliated with Wowhead or Blizzard.
 
@@ -26,26 +26,11 @@ Unofficial and not affiliated with Wowhead or Blizzard.
 
 `get_page` reads the version from the page itself and keeps only comments written for that version, so a Classic page never shows Retail comments.
 
-A server locked to one edition drops the `edition` input and refuses pages of other versions, checked after redirects. Lock it with the edition paths of the hosted endpoint, or with `WOWHEAD_EDITION` when you run it yourself.
-
-## Hosted endpoint
-
-Connect any MCP client to one of these URLs over Streamable HTTP:
-
-| URL | Serves |
-|---|---|
-| `https://wowhead-mcp.marco-vrinssen.workers.dev/mcp` | Every edition |
-| `https://wowhead-mcp.marco-vrinssen.workers.dev/forever/mcp` | WoW Forever only. Every edition has its own path, like `/classic/mcp` |
-
-- Claude Code: `claude mcp add --scope user --transport http wowhead https://wowhead-mcp.marco-vrinssen.workers.dev/mcp`
-- Claude app and claude.ai: Settings, Connectors, Add custom connector, then paste a URL.
-- Other agents and bots: point their MCP client at a URL.
-
-It runs on free plans, so each IP gets 30 requests a minute, and it can be down for the rest of the day once the free daily quota is used up. For heavy use, run your own copy.
+A server locked to one edition drops the `edition` input and refuses pages of other versions, checked after redirects. Lock it with `WOWHEAD_EDITION`, like `forever`.
 
 ## Install
 
-Requires Node 22 or later and git.
+Requires Node 22 or later and git. Your agent starts the server itself, so nothing needs to keep running.
 
 ### Claude Code
 
@@ -53,32 +38,44 @@ Requires Node 22 or later and git.
 claude mcp add --scope user wowhead -- npx -y github:studio-miyanko/wowhead-mcp#semver:^1
 ```
 
-Locked to one version:
+Locked to one version, like WoW Forever:
 
 ```sh
-claude mcp add --scope user wowhead-classic --env WOWHEAD_EDITION=classic -- npx -y github:studio-miyanko/wowhead-mcp#semver:^1
+claude mcp add --scope user wowhead --env WOWHEAD_EDITION=forever -- npx -y github:studio-miyanko/wowhead-mcp#semver:^1
 ```
 
 ### Claude desktop app
 
-In Settings, Developer, Edit Config, add the server and restart the app:
+In Settings, Developer, Edit Config, add the server and restart the app. Leave out `env` to read every version:
 
 ```json
 {
   "mcpServers": {
-    "wowhead": { "command": "npx", "args": ["-y", "github:studio-miyanko/wowhead-mcp#semver:^1"] }
+    "wowhead": {
+      "command": "npx",
+      "args": ["-y", "github:studio-miyanko/wowhead-mcp#semver:^1"],
+      "env": { "WOWHEAD_EDITION": "forever" }
+    }
   }
 }
 ```
 
+### Other agents
+
+Cursor, VS Code, Codex and other MCP clients run the same command as a stdio server: `npx -y github:studio-miyanko/wowhead-mcp#semver:^1`, with `WOWHEAD_EDITION` in its environment to lock a version.
+
 ### Your own Worker
 
-`src/worker.js` serves the same tools on Cloudflare Workers, at `/mcp` and the edition paths, with a per-IP rate limit. Change `name` in `wrangler.jsonc` first, so the Worker gets its own URL:
+`src/worker.js` serves the same tools on Cloudflare Workers at `/mcp`, and locked to one edition at paths like `/forever/mcp`. Callers from the internet get 30 requests a minute per IP. Your other Workers can call it through a service binding, which skips that limit.
+
+This repo's Worker is private and only serves its owner's Discord bot. For a public copy of your own, change `name` and set `workers_dev` to `true` in `wrangler.jsonc`, then deploy:
 
 ```sh
 npm install
 npx wrangler deploy
 ```
+
+A public copy also works in claude.ai and the Claude apps: Settings, Connectors, Add custom connector, then paste its URL. Every request counts against your Cloudflare account's free daily requests.
 
 ### Your own code
 
@@ -86,6 +83,7 @@ Import `createServer` from `wowhead-mcp/src/server.js`, optionally with `{ editi
 
 ## How it behaves
 
+- Tells agents how to use it when they connect: look facts up instead of answering from memory, read long pages to the end and read the change markers in patch notes.
 - Follows Wowhead's robots.txt. Names are looked up in database listings like `/forever/quests/name:library`, because `/search` is disallowed for bots.
 - Names this repo in its User-Agent, and caches answers for an hour.
 - Fetches nothing outside Wowhead.

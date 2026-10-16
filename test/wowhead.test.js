@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 
 import { htmlToText, markupToText } from '../src/text.js';
@@ -57,6 +58,27 @@ test('every version reads on its own path, with tooltips and lookups of that ver
   const mists = await getWowheadPage('mop-classic/item=19019');
   assert.match(mists, /^# .+\nhttps:\/\/www\.wowhead\.com\/mop-classic\/item=19019/);
   assert.match(mists, /## Tooltip\nThunderfury, Blessed Blade of the Windseeker\n/);
+});
+
+test('agents get the lookup rules when they connect, with the version lock in them', async () => {
+  const child = spawn(process.execPath, ['src/index.js'], { env: { ...process.env, WOWHEAD_EDITION: 'forever' }, stdio: ['pipe', 'pipe', 'inherit'] });
+  try {
+    const reply = new Promise((done) => {
+      let buffer = '';
+      child.stdout.on('data', (chunk) => {
+        buffer += chunk;
+        if (buffer.includes('\n')) done(JSON.parse(buffer.slice(0, buffer.indexOf('\n'))));
+      });
+    });
+    const params = { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } };
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params })}\n`);
+    const { result } = await reply;
+    assert.match(result.instructions, /never from memory/);
+    assert.match(result.instructions, /call get_page again with that offset/);
+    assert.match(result.instructions, /Only WoW Forever pages open\. For a link to another version, open the same path under https:\/\/www\.wowhead\.com\/forever\//);
+  } finally {
+    child.kill();
+  }
 });
 
 test('an unknown edition fails when the server is built', () => {

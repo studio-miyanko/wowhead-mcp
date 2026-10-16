@@ -25,14 +25,31 @@ function text(value) {
   return { content: [{ type: 'text', text: value }] };
 }
 
+// Agents read these when they connect, so every host gets the lookup rules without a plugin or skill of its own.
+// Every client puts them into the model's context, so they stay short.
+function instructions(scope, only) {
+  return [
+    `Answer ${scope} questions from these tools, never from memory, because stats, drop chances, coordinates and quest steps differ between game versions.`,
+    'Search with English names. For a nickname or a part of an item, search its official name.',
+    'Read long pages to the end. A part that names an offset has more, so call get_page again with that offset.',
+    'In patch notes, "52 (was 38)" is a change from 38 to 52, "(new: ...)" is added and "(removed: ...)" is removed text. '
+      + 'Headings like "## Hunter" name the class or spell group. Lines like "Effect #1 Apply Aura" are internal data, '
+      + 'so a change that leaves the tooltip numbers alone has no visible effect.',
+    only
+      ? `Only ${scope} pages open. For a link to another version, open the same path under ${editionUrl(only)}/.`
+      : 'Pass the edition the user plays. A page URL picks its version by path, like /classic/ or /forever/.',
+    'Link the Wowhead pages you used.',
+  ].join('\n');
+}
+
 // A host that serves one game version passes `edition`, which drops the edition input from every tool
 // and refuses pages of other versions, so its answers never mix in another version's data.
 export function createServer({ edition: only } = {}) {
   if (only && !EDITIONS[only]) {
     throw new Error(`Unknown Wowhead edition "${only}". Use one of: ${Object.keys(EDITIONS).join(', ')}.`);
   }
-  const server = new McpServer({ name: 'wowhead-mcp', version: pkg.version });
   const scope = only ? `WoW ${EDITIONS[only].label}` : 'World of Warcraft';
+  const server = new McpServer({ name: 'wowhead-mcp', version: pkg.version }, { instructions: instructions(scope, only) });
   const editionInput = only ? {} : {
     edition: z.enum(Object.keys(EDITIONS)).default('retail')
       .describe('Game version: retail, classic (Era, Hardcore), tbc (Anniversary), wotlk, cata, mop-classic or forever'),

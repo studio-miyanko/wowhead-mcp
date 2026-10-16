@@ -1,6 +1,6 @@
 {
   "name": "wowhead-mcp",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Read-only MCP server that reads Wowhead for every World of Warcraft version: items, drops, quests, NPCs, spells, guides, news and patch notes.",
   "license": "MIT",
